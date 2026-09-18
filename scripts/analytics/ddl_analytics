@@ -1,0 +1,113 @@
+declare @schema nvarchar(MAX) = '';
+select @schema += 'drop view ' + QUOTENAME(s.name) + '.' + QUOTENAME(v.name) + ';' + char(13)
+from sys.views as v
+join sys.schemas as s
+	on s.schema_id = v.schema_id
+where s.name = 'analytics';
+
+if @schema <> ''
+    exec sp_executesql @schema;
+go
+
+drop schema if exists analytics;
+go
+
+create schema analytics;
+go
+
+create view analytics.executive_sales as
+select
+	SUM(sales_amount) as total_sales,
+	COUNT(distinct order_number) as total_orders,
+	SUM(quantity) as total_items_sold,
+	COUNT(distinct customer_key) as total_customers,
+	CAST
+	(
+		SUM(sales_amount) / NULLIF(COUNT(distinct order_number), 0) as decimal(18,2)
+	) as average_order_value
+from gold.fact_sales;
+go
+
+create view analytics.category_performance as
+
+select
+    p.category,
+    SUM(f.sales_amount) as total_sales,
+    SUM(f.quantity) as total_items,
+    COUNT(distinct f.order_number) as total_orders,
+    RANK() over (order by SUM(f.sales_amount) desc) as sales_rank
+from gold.fact_sales as f
+inner join gold.dim_products as p
+    on f.product_key = p.product_key
+group by p.category;
+go
+
+create view analytics.customer_analysis as
+
+select
+    c.customer_key,
+    c.first_name,
+    c.last_name,
+    c.country,
+    SUM(f.sales_amount) as total_sales,
+    COUNT(distinct f.order_number) as total_orders,
+    SUM(f.quantity) AS total_items,
+    CAST(SUM(f.sales_amount)/ NULLIF(COUNT(distinct f.order_number), 0) as decimal(18,2)) as average_order_value,
+    RANK() over (order by SUM(f.sales_amount) desc) as sales_rank
+from gold.fact_sales as f
+inner join gold.dim_customers as c
+    on f.customer_key = c.customer_key
+group by c.customer_key, c.first_name, c.last_name, c.country;
+go
+
+create view analytics.product_performance as
+
+select
+    p.product_key,
+    p.product_name,
+    p.category,
+    SUM(f.sales_amount) as total_sales,
+    SUM(f.quantity) as total_items,
+    COUNT(distinct f.order_number) as total_orders,
+    RANK() over (order by SUM(f.sales_amount) desc) as sales_rank
+from gold.fact_sales as f
+inner join gold.dim_products as p
+    on f.product_key = p.product_key
+group by p.product_key, p.product_name, p.category;
+go
+
+create view analytics.sales_trends as
+
+with monthly_sales as (
+    select
+        d.year_number,
+        d.month_number,
+        SUM(f.sales_amount) as total_sales,
+        COUNT(distinct f.order_number) as total_orders,
+        SUM(f.quantity) as total_items
+    from gold.fact_sales as f
+    inner join gold.dim_date as d
+        on TRY_CONVERT(date, CONVERT(varchar(8), f.order_date_key)) = d.full_date
+        group by d.year_number, d.month_number
+        ),
+sales_with_previous as (
+    select
+        year_number,
+        month_number,
+        total_sales,
+        total_orders,
+        total_items,
+        LAG(total_sales) over (order by year_number, month_number) as previous_month_sales
+    from monthly_sales
+)
+
+select
+    year_number,
+    month_number,
+    total_orders,
+    total_items,
+    total_sales,
+    previous_month_sales,
+    CAST((total_sales - previous_month_sales)/ NULLIF(previous_month_sales, 0) * 100 as decimal(10,2)) as mom_growth_percentage
+from sales_with_previous;
+go
